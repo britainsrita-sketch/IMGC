@@ -1,7 +1,9 @@
 import os
 import html
 import logging
-import httpx
+import json
+import urllib.request
+import urllib.error
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,7 +14,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
@@ -36,25 +38,25 @@ LANGUAGES = {
     "it":    "🇮🇹 Italian",
 }
 
-# ── API fetch ─────────────────────────────────────────────────────────────────
-async def fetch_word(word: str, lang: str) -> tuple[bool, list | None]:
+# ── API fetch (pure stdlib, no httpx) ────────────────────────────────────────
+def fetch_word(word: str, lang: str) -> tuple:
     url = API_URL.format(lang=lang, word=word.lower().strip())
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
+        req = urllib.request.Request(url, headers={"User-Agent": "PolyglotBot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
                 if isinstance(data, list) and len(data) > 0:
                     return True, data
-            return False, None
+        return False, None
     except Exception as e:
         logger.error(f"API fetch failed: {e}")
         return False, None
 
 
 # ── Result formatter ──────────────────────────────────────────────────────────
-def build_result(data: list, lang: str) -> tuple[str, str | None]:
-    entry = data[0]
+def build_result(data: list, lang: str) -> tuple:
+    entry    = data[0]
     word     = entry.get("word", "")
     phonetic = entry.get("phonetic", "")
     meanings = entry.get("meanings", [])
@@ -67,12 +69,9 @@ def build_result(data: list, lang: str) -> tuple[str, str | None]:
             audio_url = raw if raw.startswith("http") else "https:" + raw
             break
 
-    # Build message
     lines = [f"📖 <b>{html.escape(word.upper())}</b>"]
-
     if phonetic:
         lines.append(f"🔊 <code>{html.escape(phonetic)}</code>")
-
     lines.append(f"🌐 <i>{html.escape(LANGUAGES.get(lang, lang))}</i>")
     lines.append("━━━━━━━━━━━━━━━")
 
@@ -83,7 +82,6 @@ def build_result(data: list, lang: str) -> tuple[str, str | None]:
         ants = meaning.get("antonyms", [])
 
         lines.append(f"\n<b>{html.escape(pos)}</b>")
-
         for i, d in enumerate(defs[:2], 1):
             defn_text = html.escape(d.get("definition", ""))
             example   = html.escape(d.get("example", ""))
@@ -172,7 +170,6 @@ async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     word = update.message.text.strip()
     lang = context.user_data.get("lang", DEFAULT_LANG)
 
-    # Basic input validation
     clean = word.replace("-", "").replace(" ", "")
     if not clean.isalpha():
         await update.message.reply_text(
@@ -182,14 +179,13 @@ async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if len(word.split()) > 3:
         await update.message.reply_text(
-            "⚠️ Please look up one word (or a short phrase) at a time."
+            "⚠️ Please look up one word (or short phrase) at a time."
         )
         return
 
-    # Send loading indicator
     loading_msg = await update.message.reply_text("🔍 Looking up...")
 
-    success, data = await fetch_word(word, lang)
+    success, data = fetch_word(word, lang)
 
     if not success or not data:
         await loading_msg.edit_text(
@@ -204,7 +200,6 @@ async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         result_text, audio_url = build_result(data, lang)
         await loading_msg.edit_text(result_text, parse_mode="HTML")
 
-        # Send pronunciation audio if available
         if audio_url:
             try:
                 await update.message.reply_audio(
@@ -218,7 +213,7 @@ async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         logger.error(f"Result build error: {e}")
         await loading_msg.edit_text(
-            "⚠️ Something went wrong while formatting the result. Please try again."
+            "⚠️ Something went wrong formatting the result. Please try again."
         )
 
 
